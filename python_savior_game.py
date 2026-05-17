@@ -27,6 +27,529 @@ class ScoreManager:
     
     def load_scores(self):
         if os.path.exists(self.data_file):
+            try:
+                with open(self.data_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                return []
+        return []
+    
+    def save_scores(self):
+        try:
+            with open(self.data_file, 'w', encoding='utf-8') as f:
+                json.dump(self.scores, f, indent=2, ensure_ascii=False)
+        except:
+            pass
+    
+    def add_score(self, player_name, level, score, time_taken):
+        record = {
+            "name": player_name,
+            "level": level,
+            "score": score,
+            "time": time_taken,
+            "date": datetime.now().strftime("%d/%m/%Y %H:%M")
+        }
+        self.scores.append(record)
+        self.save_scores()
+    
+    def get_top_scores(self, limit=10):
+        sorted_scores = sorted(self.scores, key=lambda x: x["score"], reverse=True)
+        return sorted_scores[:limit]
+
+# ================== GAME ENGINE ==================
+class CombatGame:
+    def __init__(self):
+        self.score_manager = ScoreManager()
+        self.reset_game()
+    
+    def reset_game(self):
+        self.current_level = 1
+        self.player_name = ""
+        self.player_hp = 100
+        self.player_max_hp = 100
+        self.player_attack = 12
+        self.player_level = 1
+        self.player_exp = 0
+        self.player_exp_needed = 100
+        self.score = 0
+        self.start_time = None
+        self.game_active = False
+        self.victory = False
+        # Khởi tạo virus hiện tại
+        self.current_virus = None
+        self.current_virus_hp = 0
+        self.combat_log = []
+    
+    def start_game(self, player_name):
+        self.reset_game()
+        self.player_name = player_name
+        self.game_active = True
+        self.start_time = time.time()
+        self.load_virus()
+        return True
+    
+    def load_virus(self):
+        """Tải virus cho level hiện tại"""
+        if self.current_level <= len(GameConfig.VIRUSES):
+            self.current_virus = GameConfig.VIRUSES[self.current_level - 1].copy()
+            self.current_virus_hp = self.current_virus["hp"]
+        return self.current_virus
+    
+    def get_current_virus(self):
+        if self.current_virus is None:
+            self.load_virus()
+        return self.current_virus
+    
+    def player_attack_action(self):
+        virus = self.get_current_virus()
+        
+        # Tính sát thương (có crit 20%)
+        is_crit = random.random() < 0.2
+        damage = random.randint(self.player_attack - 3, self.player_attack + 3)
+        if is_crit:
+            damage = int(damage * 1.5)
+        
+        self.current_virus_hp -= damage
+        
+        result = {
+            "action": "attack",
+            "damage": damage,
+            "is_crit": is_crit,
+            "virus_hp_remaining": max(0, self.current_virus_hp),
+            "virus_defeated": self.current_virus_hp <= 0
+        }
+        
+        if result["virus_defeated"]:
+            # Nhận EXP và điểm
+            exp_gain = virus["exp"]
+            self.player_exp += exp_gain
+            self.score += 100 * self.current_level
+            
+            # Check level up
+            level_up = False
+            if self.player_exp >= self.player_exp_needed:
+                self.player_level += 1
+                self.player_exp -= self.player_exp_needed
+                self.player_exp_needed = int(self.player_exp_needed * 1.2)
+                self.player_attack += 3
+                self.player_max_hp += 20
+                self.player_hp = min(self.player_hp + 10, self.player_max_hp)
+                level_up = True
+            
+            # Chuyển level hoặc kết thúc game
+            if self.current_level < 5:
+                self.current_level += 1
+                self.load_virus()
+                result["next_level"] = True
+                result["level_up"] = level_up
+                result["exp_gain"] = exp_gain
+                result["new_level"] = self.current_level
+            else:
+                # Chiến thắng game
+                self.game_active = False
+                self.victory = True
+                time_taken = int(time.time() - self.start_time)
+                self.score_manager.add_score(self.player_name, 5, self.score, time_taken)
+                result["victory"] = True
+                result["time_taken"] = time_taken
+                result["final_score"] = self.score
+        else:
+            # Virus tấn công lại
+            virus_damage = random.randint(max(1, virus["attack"] - 3), virus["attack"])
+            self.player_hp -= virus_damage
+            
+            result["virus_attack"] = virus_damage
+            result["player_hp_remaining"] = max(0, self.player_hp)
+            
+            if self.player_hp <= 0:
+                self.game_active = False
+                result["game_over"] = True
+        
+        return result
+    
+    def heal_action(self):
+        # Hồi máu (tiêu tốn 20 điểm)
+        if self.score >= 20:
+            heal_amount = random.randint(15, 30)
+            self.player_hp = min(self.player_hp + heal_amount, self.player_max_hp)
+            self.score -= 20
+            
+            # Virus tấn công khi hồi máu
+            virus = self.get_current_virus()
+            virus_damage = random.randint(max(1, virus["attack"] - 2), virus["attack"])
+            self.player_hp -= virus_damage
+            
+            result = {
+                "action": "heal",
+                "heal_amount": heal_amount,
+                "virus_attack": virus_damage,
+                "player_hp_remaining": max(0, self.player_hp),
+                "score_cost": 20,
+                "current_score": self.score
+            }
+            
+            if self.player_hp <= 0:
+                self.game_active = False
+                result["game_over"] = True
+            
+            return result
+        else:
+            return {"action": "heal", "insufficient": True, "need": 20, "current": self.score}
+    
+    def defend_action(self):
+        # Phòng thủ (giảm sát thương nhận)
+        virus = self.get_current_virus()
+        virus_damage = random.randint(max(1, virus["attack"] - 5), max(2, virus["attack"] - 2))
+        virus_damage = max(1, virus_damage)
+        self.player_hp -= virus_damage
+        
+        result = {
+            "action": "defend",
+            "damage_reduced": True,
+            "virus_attack": virus_damage,
+            "player_hp_remaining": max(0, self.player_hp)
+        }
+        
+        if self.player_hp <= 0:
+            self.game_active = False
+            result["game_over"] = True
+        
+        return result
+
+# ================== GIAO DIỆN ==================
+
+def setup_page():
+    st.set_page_config(
+        page_title="Python Savior - Chiến Đấu Giải Cứu",
+        page_icon="⚔️",
+        layout="wide"
+    )
+    
+    st.markdown("""
+    <style>
+    .stApp { background: linear-gradient(135deg, #0a0a0a 0%, #0d1b2a 100%); }
+    .game-title {
+        text-align: center;
+        padding: 20px;
+        background: linear-gradient(135deg, #1b263b 0%, #415a77 100%);
+        border-radius: 20px;
+        border: 2px solid #ff4444;
+        margin-bottom: 20px;
+    }
+    .virus-card {
+        background: linear-gradient(135deg, #4a0000 0%, #8b0000 100%);
+        border-radius: 15px;
+        padding: 15px;
+        text-align: center;
+        border: 2px solid #ff0000;
+    }
+    .player-card {
+        background: linear-gradient(135deg, #0d3b0d 0%, #1a5c1a 100%);
+        border-radius: 15px;
+        padding: 15px;
+        text-align: center;
+        border: 2px solid #00ff88;
+    }
+    .damage-text {
+        color: #ff4444;
+        font-size: 20px;
+        font-weight: bold;
+    }
+    .heal-text {
+        color: #00ff88;
+        font-size: 20px;
+        font-weight: bold;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+def display_header():
+    st.markdown("""
+    <div class="game-title">
+        <h1 style='color: #ff4444; margin: 0;'>⚔️ PYTHON SAVIOR - CHIẾN ĐẤU ⚔️</h1>
+        <h3 style='color: #ffffff;'>Đánh bay virus máy tính, cứu thế giới!</h3>
+        <p style='color: #aaa;'>⚡ Chọn hành động thông minh để chiến thắng ⚡</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+def display_battle_status(game):
+    virus = game.get_current_virus()
+    if virus:
+        virus_hp_percent = game.current_virus_hp / virus["hp"] if virus["hp"] > 0 else 0
+    else:
+        virus_hp_percent = 0
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown(f"""
+        <div class="player-card">
+            <h3>🦸‍♂️ {game.player_name}</h3>
+            <p>❤️ HP: {max(0, game.player_hp)}/{game.player_max_hp}</p>
+            <p>⚔️ Sát thương: {game.player_attack}</p>
+            <p>⭐ Điểm: {game.score}</p>
+            <p>📊 Cấp {game.player_level} | EXP: {game.player_exp}/{game.player_exp_needed}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.progress(max(0, game.player_hp) / game.player_max_hp if game.player_max_hp > 0 else 1)
+    
+    with col2:
+        if virus:
+            st.markdown(f"""
+            <div class="virus-card">
+                <h3>{virus['icon']} {virus['name']} {virus['icon']}</h3>
+                <p>💀 HP: {max(0, game.current_virus_hp)}/{virus['hp']}</p>
+                <p>⚔️ Sát thương: {virus['attack']}/đòn</p>
+                <p>🎯 Level: {virus['level']}/5</p>
+            </div>
+            """, unsafe_allow_html=True)
+            st.progress(virus_hp_percent)
+
+def display_combat_log(combat_log):
+    st.markdown("### 📜 NHẬT KÝ CHIẾN ĐẤU")
+    if combat_log:
+        for msg in combat_log[-5:]:
+            if "💥" in msg or "CHÍNH XÁC" in msg or "tấn công" in msg:
+                st.markdown(f"<p style='color: #ff8888;'>{msg}</p>", unsafe_allow_html=True)
+            elif "❤️" in msg or "HỒI" in msg:
+                st.markdown(f"<p style='color: #88ff88;'>{msg}</p>", unsafe_allow_html=True)
+            elif "🏆" in msg or "CHIẾN THẮNG" in msg:
+                st.markdown(f"<p style='color: #ffd700; font-size: 18px;'>{msg}</p>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<p style='color: #cccccc;'>{msg}</p>", unsafe_allow_html=True)
+    else:
+        st.info("⚔️ Hãy bắt đầu chiến đấu!")
+
+def display_leaderboard(score_manager):
+    st.markdown("### 🏆 BẢNG XẾP HẠNG 🏆")
+    
+    top_scores = score_manager.get_top_scores(10)
+    if top_scores:
+        for i, s in enumerate(top_scores):
+            medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"#{i+1}"
+            st.markdown(f"""
+            <div style='background: #1a1a2e; border-radius: 10px; padding: 8px; margin: 5px 0; border-left: 3px solid #ff4444;'>
+                {medal} <b>{s['name']}</b> - {s['score']} điểm - 📅 {s['date']}
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("Chưa có ai cứu thế giới! Hãy là người đầu tiên!")
+
+def display_game_over(game):
+    st.markdown("""
+    <div style='text-align: center; padding: 40px; background: #4a0000; border-radius: 20px;'>
+        <h1 style='color: #ff4444;'>💀 GAME OVER 💀</h1>
+        <p style='color: white;'>Virus máy tính đã chiếm thế giới...</p>
+        <p style='color: #ffaa00;'>Hãy chiến đấu thông minh hơn để cứu nhân loại!</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+def display_victory(game):
+    st.markdown(f"""
+    <div style='text-align: center; padding: 40px; background: linear-gradient(135deg, #00aa44, #006400); border-radius: 20px;'>
+        <h1 style='color: #ffd700;'>🏆 CHIẾN THẮNG! 🏆</h1>
+        <h2 style='color: white;'>Bạn đã cứu thế giới khỏi virus máy tính!</h2>
+        <p style='color: #fff;'>⭐ Điểm số: {game.score} ⭐</p>
+        <p style='color: #fff;'>🏅 Bạn xứng đáng là Chiến binh xuất sắc nhất! 🏅</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ================== MAIN ==================
+def main():
+    setup_page()
+    display_header()
+    
+    # Khởi tạo session state
+    if "game" not in st.session_state:
+        st.session_state.game = CombatGame()
+        st.session_state.game_active = False
+        st.session_state.show_leaderboard = False
+    
+    game = st.session_state.game
+    
+    # Sidebar
+    with st.sidebar:
+        st.markdown("## 🎮 MENU")
+        if st.button("🆕 BẮT ĐẦU MỚI", key="new_game"):
+            st.session_state.game = CombatGame()
+            st.session_state.game_active = False
+            st.session_state.show_leaderboard = False
+            st.rerun()
+        
+        st.markdown("---")
+        
+        st.markdown("### 📖 HƯỚNG DẪN")
+        st.markdown("""
+        **⚔️ Tấn công**: Gây 9-15 sát thương  
+        *Có 20% chance chí mạng (x1.5)*
+        
+        **💊 Hồi máu**: Hồi 15-30 HP  
+        *Tốn 20 điểm, vẫn bị tấn công*
+        
+        **🛡️ Phòng thủ**: Giảm sát thương  
+        *Bị tấn công nhưng ít hơn*
+        
+        **🏆 Thắng 5 level để cứu thế giới!**
+        """)
+        
+        st.markdown("---")
+        display_leaderboard(game.score_manager)
+    
+    if st.session_state.show_leaderboard:
+        st.markdown("## 🏆 BẢNG XẾP HẠNG TOÀN THỜI GIAN 🏆")
+        top = game.score_manager.get_top_scores(20)
+        if top:
+            for i, s in enumerate(top):
+                medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"#{i+1}"
+                st.markdown(f"{medal} **{s['name']}** - {s['score']} điểm - 📅 {s['date']}")
+        if st.button("🔙 QUAY LẠI GAME", key="back"):
+            st.session_state.show_leaderboard = False
+            st.rerun()
+        return
+    
+    # Màn hình bắt đầu game
+    if not st.session_state.game_active and not game.game_active:
+        st.markdown("""
+        <div style='text-align: center; padding: 40px;'>
+            <h2>⚔️ CHÀO MỪNG CHIẾN BINH! ⚔️</h2>
+            <p>Thế giới đang bị virus máy tính tấn công! Hãy chiến đấu để giải cứu!</p>
+            <p>📖 <b>Cách chơi:</b></p>
+            <p>• Bấm <b style='color:#ff8888'>TẤN CÔNG</b> để gây sát thương cho virus</p>
+            <p>• Bấm <b style='color:#88ff88'>HỒI MÁU</b> để phục hồi HP (tốn 20 điểm)</p>
+            <p>• Bấm <b style='color:#ffaa88'>PHÒNG THỦ</b> để giảm sát thương nhận vào</p>
+            <p>• Đánh bại 5 con virus để cứu thế giới!</p>
+            <p style='color: #ffaa00;'>🎯 Mẹo: Tấn công thường xuyên, hồi máu khi HP thấp!</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        name = st.text_input("👤 Nhập tên chiến binh:", max_chars=20, key="player_name_input")
+        if st.button("🚀 BẮT ĐẦU CHIẾN ĐẤU", key="start_btn", use_container_width=True):
+            if name and name.strip():
+                game.start_game(name.strip())
+                st.session_state.game_active = True
+                game.combat_log = [f"🦸‍♂️ {name} bước vào trận chiến!"]
+                st.rerun()
+            else:
+                st.error("❌ Hãy nhập tên của bạn!")
+        return
+    
+    # Đang chơi
+    if game.player_hp <= 0:
+        display_game_over(game)
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            if st.button("🔄 CHƠI LẠI", key="play_again_over"):
+                st.session_state.game = CombatGame()
+                st.session_state.game_active = False
+                st.rerun()
+        return
+    
+    if game.victory:
+        display_victory(game)
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 CHƠI LẠI", key="play_again_victory"):
+                st.session_state.game = CombatGame()
+                st.session_state.game_active = False
+                st.rerun()
+        with col2:
+            if st.button("🏆 XEM BẢNG XẾP HẠNG", key="view_rank"):
+                st.session_state.show_leaderboard = True
+                st.rerun()
+        return
+    
+    # Hiển thị trạng thái chiến đấu
+    display_battle_status(game)
+    st.markdown("---")
+    display_combat_log(game.combat_log)
+    st.markdown("---")
+    
+    # Nút hành động
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("⚔️ TẤN CÔNG ⚔️", key="attack_btn", use_container_width=True):
+            result = game.player_attack_action()
+            
+            if result["action"] == "attack":
+                crit_text = "🔥 CHÍ MẠNG! 🔥 " if result.get("is_crit") else ""
+                game.combat_log.append(f"💥 {crit_text}Bạn tấn công gây {result['damage']} sát thương!")
+                
+                if result.get("virus_defeated"):
+                    game.combat_log.append(f"🎉 {game.current_virus['name']} đã bị đánh bại! 🎉")
+                    if result.get("exp_gain"):
+                        game.combat_log.append(f"✨ Nhận {result['exp_gain']} EXP! ✨")
+                    if result.get("level_up"):
+                        game.combat_log.append(f"🌟 LEVEL UP! Cấp {game.player_level}! 🌟")
+                    if result.get("next_level"):
+                        game.combat_log.append(f"⚔️ Bước vào level {result['new_level']}!")
+                    if result.get("victory"):
+                        game.combat_log.append(f"🏆 CHIẾN THẮNG! Bạn đã cứu thế giới! 🏆")
+                else:
+                    game.combat_log.append(f"💀 Virus tấn công lại, bạn mất {result['virus_attack']} HP!")
+            
+            if result.get("game_over"):
+                game.combat_log.append("💀 GAME OVER! Bạn đã thất bại... 💀")
+            
+            st.rerun()
+    
+    with col2:
+        if st.button("💊 HỒI MÁU (20 điểm) 💊", key="heal_btn", use_container_width=True):
+            result = game.heal_action()
+            
+            if result.get("insufficient"):
+                game.combat_log.append(f"❌ Không đủ điểm! Cần {result['need']} điểm, bạn có {result['current']} điểm!")
+            else:
+                game.combat_log.append(f"❤️ Hồi máu {result['heal_amount']} HP! (tốn 20 điểm, còn {result['current_score']} điểm)")
+                game.combat_log.append(f"💀 Virus tấn công, bạn mất {result['virus_attack']} HP!")
+                
+                if result.get("game_over"):
+                    game.combat_log.append("💀 GAME OVER! Bạn đã thất bại... 💀")
+            
+            st.rerun()
+    
+    with col3:
+        if st.button("🛡️ PHÒNG THỦ 🛡️", key="defend_btn", use_container_width=True):
+            result = game.defend_action()
+            
+            game.combat_log.append(f"🛡️ Bạn phòng thủ, giảm sát thương nhận vào!")
+            game.combat_log.append(f"💀 Virus tấn công, bạn mất {result['virus_attack']} HP!")
+            
+            if result.get("game_over"):
+                game.combat_log.append("💀 GAME OVER! Bạn đã thất bại... 💀")
+            
+            st.rerun()
+
+if __name__ == "__main__":
+    main()# combat_game.py
+import streamlit as st
+import time
+import random
+import json
+import os
+from datetime import datetime
+
+# ================== CẤU HÌNH GAME ==================
+class GameConfig:
+    GAME_NAME = "⚔️ PYTHON SAVIOR - CHIẾN ĐẤU GIẢI CỨU ⚔️"
+    DATA_FILE = "combat_scores.json"
+    
+    VIRUSES = [
+        {"name": "🦠 VIRUS LOGIC", "level": 1, "hp": 30, "attack": 5, "exp": 50, "icon": "🦠"},
+        {"name": "🧬 VIRUS LOOP", "level": 2, "hp": 50, "attack": 8, "exp": 80, "icon": "🧬"},
+        {"name": "🎯 VIRUS FUNCTION", "level": 3, "hp": 70, "attack": 12, "exp": 120, "icon": "🎯"},
+        {"name": "📦 VIRUS LIST", "level": 4, "hp": 100, "attack": 15, "exp": 180, "icon": "📦"},
+        {"name": "🏆 BOSS DICTIONARY", "level": 5, "hp": 150, "attack": 20, "exp": 300, "icon": "🏆"},
+    ]
+
+# ================== QUẢN LÝ ĐIỂM ==================
+class ScoreManager:
+    def __init__(self):
+        self.data_file = GameConfig.DATA_FILE
+        self.scores = self.load_scores()
+    
+    def load_scores(self):
+        if os.path.exists(self.data_file):
             with open(self.data_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
         return []
